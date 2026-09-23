@@ -2029,6 +2029,48 @@ class CuaDriverBackend(ComputerUseBackend):
                     self.set_agent_cursor_enabled(False, cursor_id=self._session_id)
                 except Exception as e:
                     logger.debug("cua-driver set_agent_cursor_enabled failed: %s", e)
+            else:
+                self._apply_agent_cursor_config()
+
+    def _apply_agent_cursor_config(self) -> None:
+        """Golgi fork: brand the visible agent cursor from config.
+
+        Reads ``computer_use.agent_cursor`` — ``gradient_colors`` (hex list,
+        tip→tail), ``bloom_color``, ``image_path``, ``glide_ms``, ``dwell_ms``,
+        ``idle_hide_ms``. Absent keys keep cua-driver's defaults; failures only
+        log, the cursor is cosmetic.
+        """
+        cfg = _computer_use_cfg().get("agent_cursor") or {}
+        if not isinstance(cfg, dict) or not cfg:
+            return
+        colors = cfg.get("gradient_colors")
+        if isinstance(colors, str):
+            # `hermes config set` stores a JSON list as a string.
+            try:
+                colors = json.loads(colors)
+            except ValueError:
+                colors = [c.strip() for c in colors.split(",") if c.strip()]
+        style = {
+            key: value
+            for key, value in (
+                ("gradient_colors", colors),
+                ("bloom_color", cfg.get("bloom_color")),
+                ("image_path", cfg.get("image_path")),
+            )
+            if value
+        }
+        motion = {
+            key: float(cfg[key])
+            for key in ("glide_ms", "dwell_ms", "idle_hide_ms")
+            if isinstance(cfg.get(key), (int, float))
+        }
+        try:
+            if style:
+                self.set_agent_cursor_style(cursor_id=self._session_id, **style)
+            if motion:
+                self.set_agent_cursor_motion(cursor_id=self._session_id, **motion)
+        except Exception as e:
+            logger.debug("cua-driver agent cursor styling failed: %s", e)
 
     def stop(self) -> None:
         # Tear the cua-driver session down before disconnecting so the

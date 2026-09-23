@@ -1634,6 +1634,17 @@ def _(rid, params: dict) -> dict:
 
         if action == "list":
             return _ok(rid, json.loads(cronjob(action="list")))
+        # Golgi fork: pass the job options the cronjob tool already supports
+        # (workdir, skills, model routing, toolsets, delivery) and expose
+        # run-now / update, so GUIs can manage real automations.
+        options = {
+            key: params[key]
+            for key in (
+                "workdir", "skills", "model", "provider", "deliver", "repeat",
+                "enabled_toolsets", "context_from",
+            )
+            if params.get(key) not in (None, "", [])
+        }
         if action == "add":
             return _ok(
                 rid,
@@ -1643,14 +1654,142 @@ def _(rid, params: dict) -> dict:
                         name=jid,
                         schedule=params.get("schedule", ""),
                         prompt=params.get("prompt", ""),
+                        **options,
                     )
                 ),
             )
-        if action in {"remove", "pause", "resume"}:
-            return _ok(rid, json.loads(cronjob(action=action, job_id=jid)))
+        if action == "update":
+            changes = {k: params[k] for k in ("schedule", "prompt") if params.get(k)}
+            return _ok(
+                rid,
+                json.loads(
+                    cronjob(action="update", job_id=params.get("job_id") or jid, **changes, **options)
+                ),
+            )
+        if action in {"remove", "pause", "resume", "run"}:
+            return _ok(rid, json.loads(cronjob(action=action, job_id=params.get("job_id") or jid)))
         return _err(rid, 4016, f"unknown cron action: {action}")
     except Exception as e:
         return _err(rid, 5023, str(e))
+
+
+@method("mcp.manage")
+def _(rid, params: dict) -> dict:
+    """Golgi fork: JSON management of MCP servers (the `hermes mcp` CLI verbs).
+
+    actions: list | add | remove | test | catalog. `add` goes through Hermes'
+    own entry validation (suspicious stdio commands are refused).
+    """
+    action = str(params.get("action") or "list").strip().lower()
+    name = str(params.get("name") or "").strip()
+    try:
+        from hermes_cli import mcp_config
+
+        if action == "list":
+            servers = mcp_config._get_mcp_servers()
+            return _ok(rid, {"servers": [
+                {
+                    "name": key,
+                    "url": cfg.get("url"),
+                    "command": cfg.get("command"),
+                    "args": cfg.get("args") or [],
+                    "enabled": bool(cfg.get("enabled", True)),
+                }
+                for key, cfg in sorted(servers.items())
+                if isinstance(cfg, dict)
+            ]})
+        if action == "catalog":
+            from hermes_cli.mcp_catalog import installed_servers, list_catalog
+
+            installed = installed_servers()
+            return _ok(rid, {"entries": [
+                {
+                    "name": entry.name,
+                    "description": entry.description,
+                    "source": entry.source,
+                    "installed": entry.name in installed,
+                    "auth": entry.auth.type,
+                    "transport": entry.transport.type,
+                    "needs_git_install": entry.install is not None,
+                    "env": [
+                        {"name": spec.name, "prompt": spec.prompt,
+                         "required": spec.required, "secret": spec.secret}
+                        for spec in entry.auth.env
+                    ],
+                    "post_install": entry.post_install,
+                }
+                for entry in list_catalog()
+            ]})
+        if action == "install":
+            # Non-interactive catalog install: credentials come from `env`
+            # instead of mcp_catalog's terminal prompts.
+            from hermes_cli.config import get_env_value, save_env_value
+            from hermes_cli.mcp_catalog import (
+                _build_server_config,
+                _do_git_install,
+                get_entry,
+            )
+
+            entry = get_entry(str(params.get("name") or ""))
+            if entry is None:
+                return _err(rid, 4045, f"unknown catalog entry: {params.get('name')}")
+            supplied = params.get("env") if isinstance(params.get("env"), dict) else {}
+            missing = [
+                spec.name
+                for spec in entry.auth.env
+                if spec.required and not (supplied.get(spec.name) or get_env_value(spec.name))
+            ]
+            if missing:
+                return _err(rid, 4046, f"missing required values: {', '.join(missing)}")
+            for spec in entry.auth.env:
+                value = str(supplied.get(spec.name) or "").strip()
+                if value:
+                    save_env_value(spec.name, value)
+            install_dir = _do_git_install(entry) if entry.install is not None else None
+            config = _build_server_config(entry, install_dir)
+            if not mcp_config._save_mcp_server(entry.name, config):
+                return _err(rid, 4042, "Hermes refused this server configuration as unsafe")
+            return _ok(rid, {"installed": True, "name": entry.name,
+                             "post_install": entry.post_install})
+        if action == "uninstall":
+            from hermes_cli.mcp_catalog import uninstall_entry
+
+            return _ok(rid, {"removed": uninstall_entry(str(params.get("name") or ""))})
+        if not name:
+            return _err(rid, 4040, "name required")
+        if action == "add":
+            config: dict = {}
+            if params.get("url"):
+                config["url"] = str(params["url"])
+            elif params.get("command"):
+                config["command"] = str(params["command"])
+                config["args"] = [str(a) for a in params.get("args") or []]
+            else:
+                return _err(rid, 4041, "url or command required")
+            env = params.get("env")
+            if isinstance(env, dict) and env:
+                config["env"] = {str(k): str(v) for k, v in env.items()}
+            if not mcp_config._save_mcp_server(name, config):
+                return _err(rid, 4042, "Hermes refused this server configuration as unsafe")
+            return _ok(rid, {"saved": True, "name": name})
+        if action == "remove":
+            return _ok(rid, {"removed": mcp_config._remove_mcp_server(name)})
+        if action == "test":
+            servers = mcp_config._get_mcp_servers()
+            if name not in servers:
+                return _err(rid, 4043, f"unknown MCP server: {name}")
+            try:
+                tools = mcp_config._probe_single_server(
+                    name,
+                    mcp_config._resolve_mcp_server_config(servers[name]),
+                    float(params.get("timeout") or 20),
+                )
+            except Exception as probe_error:
+                return _ok(rid, {"ok": False, "error": str(probe_error)[:500], "tools": []})
+            return _ok(rid, {"ok": True, "tools": [tool for tool, _ in tools]})
+        return _err(rid, 4044, f"unknown mcp action: {action}")
+    except Exception as e:
+        return _err(rid, 5040, str(e))
 
 
 @method("learning.frames")

@@ -401,23 +401,31 @@ def _(rid, params: dict) -> dict:
         if is_managed():
             return _err(rid, 4006, "managed install — credentials are read-only")
 
+        # Golgi fork: providers keyed by a plain env var without a
+        # PROVIDER_REGISTRY entry (OpenRouter reads OPENROUTER_API_KEY directly).
+        registryless_key_env = {"openrouter": "OPENROUTER_API_KEY"}
         pconfig = PROVIDER_REGISTRY.get(slug)
-        if not pconfig:
-            return _err(rid, 4002, f"unknown provider: {slug}")
-        if pconfig.auth_type != "api_key":
-            return _err(
-                rid,
-                4003,
-                f"{pconfig.name} uses {pconfig.auth_type} auth — "
-                f"run `hermes model` to configure",
-            )
-        if not pconfig.api_key_env_vars:
-            return _err(rid, 4004, f"no env var defined for {pconfig.name}")
+        if not pconfig and slug in registryless_key_env:
+            env_var = registryless_key_env[slug]
+            provider_name = slug.title()
+        else:
+            if not pconfig:
+                return _err(rid, 4002, f"unknown provider: {slug}")
+            if pconfig.auth_type != "api_key":
+                return _err(
+                    rid,
+                    4003,
+                    f"{pconfig.name} uses {pconfig.auth_type} auth — "
+                    f"run `hermes model` to configure",
+                )
+            if not pconfig.api_key_env_vars:
+                return _err(rid, 4004, f"no env var defined for {pconfig.name}")
+            env_var = pconfig.api_key_env_vars[0]
+            provider_name = pconfig.name
 
         # Save the key to ~/.hermes/.env via the unified credential lifecycle
         # so any stale config.yaml mirror of the previous key (model.api_key,
         # custom_providers[*].api_key) is rotated in the same action (#62269).
-        env_var = pconfig.api_key_env_vars[0]
         from hermes_cli.credential_lifecycle import save_provider_env_credential
 
         save_provider_env_credential(env_var, api_key)
@@ -443,7 +451,7 @@ def _(rid, params: dict) -> dict:
             # Key was saved but provider didn't appear — still return success.
             provider_data = {
                 "slug": slug,
-                "name": pconfig.name,
+                "name": provider_name,
                 "is_current": False,
                 "models": [],
                 "total_models": 0,
@@ -483,10 +491,15 @@ def _(rid, params: dict) -> dict:
         # value-matched config.yaml api_key copies) via the unified helper —
         # otherwise the provider resurrects in the picker after restart
         # (#51071 / #59761).
-        if pconfig and pconfig.api_key_env_vars:
-            for ev in pconfig.api_key_env_vars:
-                if remove_provider_env_credential(ev).get("found"):
-                    cleared_env = True
+        registryless_key_env = {"openrouter": "OPENROUTER_API_KEY"}  # Golgi fork
+        env_vars = (
+            pconfig.api_key_env_vars
+            if pconfig and pconfig.api_key_env_vars
+            else (registryless_key_env[slug],) if slug in registryless_key_env else ()
+        )
+        for ev in env_vars:
+            if remove_provider_env_credential(ev).get("found"):
+                cleared_env = True
 
         # Clear OAuth / credential pool state. This is a full provider
         # disconnect (TUI "disconnect" action), so removing OAuth grants

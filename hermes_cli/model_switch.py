@@ -51,6 +51,16 @@ from agent.models_dev import (
 # be visible so users can pick any model they have access to.
 _UNCAPPED_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencode-go"})
 
+
+def _openrouter_full_catalog() -> bool:
+    """Golgi fork: see ``hermes_cli.models.openrouter_full_catalog_enabled``."""
+    try:
+        from hermes_cli.models import openrouter_full_catalog_enabled
+
+        return openrouter_full_catalog_enabled()
+    except Exception:
+        return False
+
 logger = logging.getLogger(__name__)
 
 
@@ -2252,7 +2262,11 @@ def list_authenticated_providers(
                 configured_models = _declared_model_ids(configured.get("models"))
         model_ids = list(dict.fromkeys([*configured_models, *model_ids]))
         total = len(model_ids)
-        if hermes_id in _UNCAPPED_PICKER_PROVIDERS:
+        if hermes_id in _UNCAPPED_PICKER_PROVIDERS or (
+            # Golgi fork: full-catalog OpenRouter is opt-in; when it is on, the
+            # picker's top-N cap would hide the very models it just unlocked.
+            hermes_id == "openrouter" and _openrouter_full_catalog()
+        ):
             top = model_ids  # Aggregator: show full catalog regardless of max_models
         else:
             top = model_ids[:max_models] if max_models is not None else model_ids

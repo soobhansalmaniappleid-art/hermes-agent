@@ -105,6 +105,8 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
 ]
 
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
+# Golgi fork: which mode the cached catalog above was built in (curated vs full).
+_openrouter_catalog_full: bool = False
 
 
 # Fallback Vercel AI Gateway snapshot used when the live catalog is unavailable.
@@ -1501,15 +1503,45 @@ def _openrouter_model_supports_tools(item: Any) -> bool:
     return "tools" in params
 
 
+def openrouter_full_catalog_enabled() -> bool:
+    """Golgi fork: serve OpenRouter's whole tool-calling catalog, not the curated few.
+
+    The curated list is an intersection filter: a live catalog of ~450 models
+    is cut down to the ~39 IDs Hermes ships with, so anything OpenRouter added
+    since the last Hermes release is invisible. Golgi's Models page is meant to
+    mirror openrouter.ai, so it opts into the full list; the curated IDs stay
+    at the head as the recommended/featured ones.
+
+    Opt in with ``HERMES_OPENROUTER_FULL_CATALOG=1`` or
+    ``model_catalog.openrouter_full: true`` in the Hermes config. Off by
+    default, so upstream behaviour is unchanged.
+    """
+    raw = os.environ.get("HERMES_OPENROUTER_FULL_CATALOG")
+    if raw is not None:
+        return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+    try:
+        from hermes_cli.config import load_config
+
+        catalog = load_config().get("model_catalog")
+        return bool(isinstance(catalog, dict) and catalog.get("openrouter_full"))
+    except Exception:
+        return False
+
+
 def fetch_openrouter_models(
     timeout: float = 8.0,
     *,
     force_refresh: bool = False,
 ) -> list[tuple[str, str]]:
     """Return the curated OpenRouter picker list, refreshed from the live catalog when possible."""
-    global _openrouter_catalog_cache
+    global _openrouter_catalog_cache, _openrouter_catalog_full
 
-    if _openrouter_catalog_cache is not None and not force_refresh:
+    full_catalog = openrouter_full_catalog_enabled()
+    if (
+        _openrouter_catalog_cache is not None
+        and not force_refresh
+        and _openrouter_catalog_full == full_catalog
+    ):
         return list(_openrouter_catalog_cache)
 
     # Prefer the remotely-hosted catalog manifest; fall back to the in-repo
@@ -1572,7 +1604,21 @@ def fetch_openrouter_models(
     first_id, first_desc = curated[0]
     if not first_desc:
         curated[0] = (first_id, "recommended")
+
+    if full_catalog:
+        # Golgi fork: the curated IDs keep their head position (pickers treat
+        # the first ones as featured); every other live model that advertises
+        # tool calling follows, alphabetically.
+        seen = {mid for mid, _ in curated}
+        rest: list[tuple[str, str]] = []
+        for mid, live_item in live_by_id.items():
+            if mid in seen or not _openrouter_model_supports_tools(live_item):
+                continue
+            rest.append((mid, "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""))
+        curated.extend(sorted(rest))
+
     _openrouter_catalog_cache = curated
+    _openrouter_catalog_full = full_catalog
     return list(curated)
 
 
