@@ -42,7 +42,9 @@ import concurrent.futures
 import functools
 import json
 import logging
+import math
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -64,6 +66,96 @@ from tools.computer_use.backend import (
 from tools.computer_use.browser_route import CuaTypedBrowserRoute
 
 logger = logging.getLogger(__name__)
+
+
+# ── Golgi fork: move the real pointer ───────────────────────────────────
+#
+# Upstream moves only the agent-cursor *overlay* — cua-driver deliberately
+# avoids stealing pointer focus, so the physical mouse never moves and the
+# agent looks like nothing is happening. Golgi wants the pointer to travel to
+# the target the way a hand would, so a person can watch and interrupt.
+#
+# Two rules keep this honest:
+#   * the glide is driven by the SAME coordinates the click is about to use,
+#     so what you watch is where the action lands — never a decorative
+#     animation running beside a different real click;
+#   * it is opt-in, and a failure to move the pointer never fails the action.
+#
+# Enable with ``computer_use.real_pointer.enabled`` or HERMES_REAL_POINTER=1.
+# Modes: "human" (watchable), "fast" (brisk), "instant" (jump, no animation).
+
+_POINTER_FRAME_SECONDS = 1.0 / 60.0
+
+# Distance in screen points → glide duration. A short hop should not take as
+# long as crossing the display; a fixed duration reads as robotic either way.
+_POINTER_HUMAN_MS = ((200, 120.0), (700, 250.0), (1500, 400.0), (None, 500.0))
+_POINTER_FAST_MS = ((200, 20.0), (700, 45.0), (1500, 65.0), (None, 80.0))
+
+
+def _pointer_duration_ms(distance: float, mode: str) -> float:
+    if mode == "instant":
+        return 0.0
+    table = _POINTER_FAST_MS if mode == "fast" else _POINTER_HUMAN_MS
+    for limit, millis in table:
+        if limit is None or distance < limit:
+            return millis
+    return table[-1][1]
+
+
+def _minimum_jerk(t: float) -> float:
+    """Smooth start and stop — the acceleration profile of a reaching hand."""
+    return t * t * t * (10.0 - 15.0 * t + 6.0 * t * t)
+
+
+def _pointer_arc(start: Tuple[float, float], end: Tuple[float, float]):
+    """Return f(progress 0..1) -> point along an eased, slightly arced path.
+
+    Straight lines look mechanical, so the Bezier control point is pushed
+    perpendicular to the travel by a tenth of the distance.
+    """
+    sx, sy = start
+    ex, ey = end
+    dx, dy = ex - sx, ey - sy
+    distance = math.hypot(dx, dy)
+    arc = distance * 0.1
+    if distance > 0:
+        cx = (sx + ex) / 2 - (dy / distance) * arc
+        cy = (sy + ey) / 2 + (dx / distance) * arc
+    else:
+        cx, cy = sx, sy
+
+    def at(progress: float) -> Tuple[float, float]:
+        t = _minimum_jerk(min(1.0, max(0.0, progress)))
+        inv = 1.0 - t
+        return (
+            inv * inv * sx + 2 * inv * t * cx + t * t * ex,
+            inv * inv * sy + 2 * inv * t * cy + t * t * ey,
+        )
+
+    return at
+
+
+def _pointer_path(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    steps: int,
+    jitter: float,
+) -> List[Tuple[int, int]]:
+    """The arc sampled at `steps` even points. Used for tests and previews;
+    the live glide samples by elapsed time instead (see _glide_real_pointer).
+
+    The jitter is a couple of pixels: enough to avoid a machine-perfect
+    curve, small enough that the pointer never appears to wobble.
+    """
+    at = _pointer_arc(start, end)
+    points: List[Tuple[int, int]] = []
+    for step in range(1, steps + 1):
+        x, y = at(step / steps)
+        if jitter and step < steps:  # never jitter the final, aimed point
+            x += random.uniform(-jitter, jitter)
+            y += random.uniform(-jitter, jitter)
+        points.append((int(round(x)), int(round(y))))
+    return points
 
 
 def _action_result_from(
@@ -2633,6 +2725,123 @@ class CuaDriverBackend(ComputerUseBackend):
         args["delivery_mode"] = "foreground"
         return None
 
+
+    # ── Golgi fork: real pointer ────────────────────────────────────────
+
+    def _real_pointer_mode(self) -> Optional[str]:
+        """"human" / "fast" / "instant", or None when the pointer stays put."""
+        raw = os.environ.get("HERMES_REAL_POINTER")
+        if raw is not None:
+            value = raw.strip().lower()
+            if value in {"", "0", "false", "no", "off"}:
+                return None
+            return value if value in {"human", "fast", "instant"} else "human"
+        cfg = _computer_use_cfg().get("real_pointer")
+        if not isinstance(cfg, dict) or not cfg.get("enabled"):
+            return None
+        mode = str(cfg.get("mode") or "human").strip().lower()
+        return mode if mode in {"human", "fast", "instant"} else "human"
+
+    def _window_origin_px(self, window_id: Any) -> Optional[Tuple[float, float]]:
+        """Top-left of a window in screen pixels, for window-local coordinates."""
+        try:
+            listing = self._session.call_tool("list_windows", {})
+        except Exception:
+            return None
+        windows = (listing or {}).get("windows")
+        if not isinstance(windows, list):
+            return None
+        scale = self._backing_scale()
+        for window in windows:
+            if not isinstance(window, dict) or window.get("window_id") != window_id:
+                continue
+            bounds = window.get("bounds")
+            if not isinstance(bounds, dict):
+                return None
+            try:
+                return float(bounds["x"]) * scale, float(bounds["y"]) * scale
+            except (KeyError, TypeError, ValueError):
+                return None
+        return None
+
+    def _backing_scale(self) -> float:
+        try:
+            size = self._session.call_tool("get_screen_size", {}) or {}
+            scale = float(size.get("scale_factor") or 1.0)
+            return scale if scale > 0 else 1.0
+        except Exception:
+            return 1.0
+
+    def _action_target_px(self, args: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+        """Where this action lands, in desktop pixels — or None if unknown.
+
+        Only coordinate-addressed actions can be located without another
+        round-trip; an element-addressed click resolves inside the driver, so
+        the pointer stays where it is rather than guessing at a position the
+        click will not use.
+        """
+        x, y = args.get("x"), args.get("y")
+        if x is None or y is None:
+            x, y = args.get("from_x"), args.get("from_y")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return None
+        window_id = args.get("window_id")
+        if window_id is None:
+            return float(x), float(y)  # already desktop-space
+        origin = self._window_origin_px(window_id)
+        if origin is None:
+            return None
+        return origin[0] + float(x), origin[1] + float(y)
+
+    def _glide_real_pointer(self, args: Dict[str, Any]) -> None:
+        """Walk the physical pointer to where the next action will land."""
+        mode = self._real_pointer_mode()
+        if mode is None:
+            return
+        try:
+            target = self._action_target_px(args)
+            if target is None:
+                return
+            scale = self._backing_scale()
+            start_points = self.get_cursor_position()
+            start = (start_points[0] * scale, start_points[1] * scale)
+            # Thresholds are in points, the units a person judges distance in.
+            distance = math.hypot(target[0] - start[0], target[1] - start[1]) / scale
+            duration_ms = _pointer_duration_ms(distance, mode)
+            if duration_ms <= 0 or distance < 2:
+                self._move_real_pointer(target)
+                return
+            # Sample by elapsed time, not by step count: each driver call
+            # costs something, and on a slow transport a step-driven loop
+            # would stretch a 250ms glide into seconds. Running behind
+            # schedule costs frames, never the duration the mode promises.
+            at = _pointer_arc(start, target)
+            jitter = 2.0 * scale
+            duration = duration_ms / 1000.0
+            began = time.monotonic()
+            while True:
+                progress = (time.monotonic() - began) / duration
+                if progress >= 1.0:
+                    break
+                x, y = at(progress)
+                self._move_real_pointer(
+                    (x + random.uniform(-jitter, jitter), y + random.uniform(-jitter, jitter))
+                )
+                remaining = _POINTER_FRAME_SECONDS - (time.monotonic() - began) % _POINTER_FRAME_SECONDS
+                time.sleep(min(remaining, _POINTER_FRAME_SECONDS))
+            self._move_real_pointer(target)  # land exactly on the aimed point
+        except Exception as error:  # cosmetic: never fail the real action
+            logger.debug("real pointer glide skipped: %s", error)
+
+    def _move_real_pointer(self, point: Tuple[float, float]) -> None:
+        """One hop of the OS pointer. `scope="desktop"` with no target is the
+        only shape cua-driver routes to global input; passing a display target
+        is rejected as an invalid action target."""
+        self._session.call_tool(
+            "move_cursor",
+            {"x": int(round(point[0])), "y": int(round(point[1])), "scope": "desktop"},
+        )
+
     def _run_input_action(
         self,
         action: str,
@@ -2679,6 +2888,9 @@ class CuaDriverBackend(ComputerUseBackend):
             )
             if not focused.ok:
                 return focused
+        # Golgi fork: let the pointer travel to the target before it is used,
+        # driven by these exact coordinates so watching matches what happens.
+        self._glide_real_pointer(args)
         result = self._action(action, args)
         if bring_to_front:
             result.meta["foreground_focus"] = {
