@@ -49,6 +49,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+from tools.computer_use import screen_cache
 from tools.computer_use.backend import (
     ActionResult,
     CaptureResult,
@@ -601,7 +602,12 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
                 "window_id": args.get("window_id"),
             })
         cap = backend.capture(**capture_kwargs)
-        return _capture_response(cap, max_elements=_coerce_max_elements(args.get("max_elements")))
+        return _cached_capture_response(
+            backend, cap,
+            target=capture_kwargs,
+            fresh=bool(args.get("fresh")),
+            max_elements=_coerce_max_elements(args.get("max_elements")),
+        )
 
     if action == "wait":
         seconds = float(args.get("seconds", 1.0))
@@ -1269,14 +1275,16 @@ def _maybe_follow_capture(
         window_id = target.get("window_id")
         mode = _capture_after_mode()
         if pid is not None and window_id is not None:
-            cap = backend.capture(mode=mode, pid=pid, window_id=window_id)
+            follow_target = {"pid": pid, "window_id": window_id}
         else:
-            cap = backend.capture(mode=mode, app=getattr(backend, "_last_app", None))
+            follow_target = {"app": getattr(backend, "_last_app", None)}
+        cap = backend.capture(mode=mode, **follow_target)
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
-    # Combine action summary with the capture.
-    resp = _capture_response(cap)
+    # Combine action summary with the capture. An unchanged screen after an
+    # action is itself the answer ("that click had no visible effect").
+    resp = _cached_capture_response(backend, cap, target=follow_target)
     if isinstance(resp, dict) and resp.get("_multimodal"):
         # Keep the complete evidence/verdict contract visible when an image is
         # attached; otherwise capture_after would accidentally discard the
@@ -1293,6 +1301,70 @@ def _maybe_follow_capture(
         data = {"capture": resp}
     data.update(_action_payload(res))
     return json.dumps(data)
+
+
+def _cached_capture_response(
+    backend: ComputerUseBackend,
+    cap: CaptureResult,
+    *,
+    target: Optional[Dict[str, Any]] = None,
+    fresh: bool = False,
+    max_elements: int = _DEFAULT_MAX_ELEMENTS,
+) -> Any:
+    """``_capture_response`` behind the screen-state cache (see screen_cache.py).
+
+    Only image-bearing captures are cached: an AX capture is already text.
+    Any cache failure falls back to the plain response, never an error.
+    """
+    try:
+        cache = screen_cache.cache_for(backend)
+        if cache is None or not cap.png_b64 or cap.mode == "ax":
+            return _capture_response(cap, max_elements=max_elements)
+        key = screen_cache.target_key(cap, target)
+        state = screen_cache.fingerprint(cap)
+        if fresh:
+            cache.forget(key)
+        previous = cache.check(key, state)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("screen cache unavailable: %s", e)
+        return _capture_response(cap, max_elements=max_elements)
+
+    if previous is None:
+        resp = _capture_response(cap, max_elements=max_elements)
+        if isinstance(resp, str) and '"vision_analysis"' in resp:
+            try:
+                cache.remember_aux_text(key, str(json.loads(resp).get("vision_analysis") or ""))
+            except (TypeError, ValueError):
+                pass
+        return resp
+
+    age = max(0.0, state.captured_at - previous.captured_at)
+    visible = cap.elements[:max_elements]
+    lines = [
+        f"capture mode={cap.mode} {cap.width}x{cap.height}"
+        + (f" app={cap.app}" if cap.app else "")
+        + (f" window={cap.window_title!r}" if cap.window_title else ""),
+        f"Screen unchanged since the capture {age:.0f}s ago (same picture, same "
+        "elements); screenshot omitted to save tokens. The element indices below "
+        "are current. Pass fresh=true if you need the image again.",
+        f"{len(cap.elements)} interactable element(s):",
+        *_format_elements(visible),
+    ]
+    payload: Dict[str, Any] = {
+        "mode": cap.mode,
+        "width": cap.width,
+        "height": cap.height,
+        "app": cap.app,
+        "window_title": cap.window_title,
+        "unchanged": True,
+        "unchanged_for_seconds": round(age, 1),
+        "elements": [_element_to_dict(e) for e in visible],
+        "total_elements": len(cap.elements),
+        "summary": "\n".join(lines),
+    }
+    if previous.aux_text:
+        payload["vision_analysis"] = previous.aux_text
+    return json.dumps(payload)
 
 
 def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str]:

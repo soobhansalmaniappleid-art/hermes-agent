@@ -334,6 +334,15 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
             "to_x": {"type": "number", "description": "Typed browser drag destination x."},
             "to_y": {"type": "number", "description": "Typed browser drag destination y."},
             # ── return shape ───────────────────────────────────────
+            "fresh": {
+                "type": "boolean",
+                "description": (
+                    "For action='capture': always return a new screenshot. By "
+                    "default an unchanged screen is answered with text only "
+                    "(elements still listed) to save tokens; use fresh=true "
+                    "when you need the pixels again."
+                ),
+            },
             "capture_after": {
                 "type": "boolean",
                 "description": (

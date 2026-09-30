@@ -3077,6 +3077,10 @@ DEFAULT_CONFIG = {
         # Cap driver screenshot longest edge (pixels) via set_config on
         # session start. Shrinks SOM multimodal payloads; 0 disables.
         "max_image_dimension": 1456,
+        # Golgi screen-state cache: answer a re-capture of an unchanged
+        # window with text instead of another screenshot. ttl_seconds bounds
+        # how long an unchanged screen may go without a full re-send.
+        "screen_cache": {"enabled": True, "ttl_seconds": 90},
         # Mode for capture_after follow-ups: som (screenshot + overlays —
         # default), ax (elements only, no PNG — faster), vision (pixels only).
         "capture_after_mode": "som",
