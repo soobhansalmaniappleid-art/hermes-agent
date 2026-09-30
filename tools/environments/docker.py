@@ -555,6 +555,105 @@ def _egress_proxy_args_for_docker() -> tuple[list[str], dict[str, str], list[str
     return (volume_args, env_overrides, host_args)
 
 
+# Network lock: HTTPS_PROXY alone only *asks* sandboxed programs to use the
+# egress proxy; anything opening a raw socket still reaches the internet. With
+# proxy.network_lock the sandbox joins an --internal Docker network that has no
+# route out, and its single reachable peer is a tiny gateway container that
+# forwards the two proxy ports to the host-side proxy and nothing else.
+_EGRESS_NETWORK = "hermes-egress"
+_EGRESS_GATEWAY_IMAGE = "alpine/socat:1.8.0.3"
+
+
+def _egress_network_lock_enabled() -> bool:
+    try:
+        from hermes_cli.config import load_config as _load_cfg
+
+        return bool((_load_cfg().get("proxy") or {}).get("network_lock", False))
+    except Exception:  # noqa: BLE001 - unreadable config: keep upstream behavior
+        return False
+
+
+def _egress_gateway_name(tunnel_port: int) -> str:
+    return f"hermes-egress-gw-{tunnel_port}"
+
+
+def _docker_ok(docker_exe: str, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [docker_exe, *args],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=timeout, stdin=subprocess.DEVNULL,
+    )
+
+
+def _ensure_egress_gateway(docker_exe: str, tunnel_port: int) -> str:
+    """Create the internal network and its proxy-only gateway; return the gateway name.
+
+    Idempotent: an existing network or running gateway is reused. Raises
+    RuntimeError when either cannot be set up, so a locked sandbox never
+    silently starts with open networking.
+    """
+    if _docker_ok(docker_exe, "network", "inspect", _EGRESS_NETWORK).returncode != 0:
+        created = _docker_ok(
+            docker_exe, "network", "create", "--internal",
+            "--label", "hermes-egress-network=1", _EGRESS_NETWORK,
+        )
+        # A concurrent sandbox may have created it between inspect and create.
+        if created.returncode != 0 and "already exists" not in created.stderr:
+            raise RuntimeError(f"Could not create the {_EGRESS_NETWORK} network: {created.stderr.strip()}")
+
+    name = _egress_gateway_name(tunnel_port)
+    state = _docker_ok(docker_exe, "inspect", "-f", "{{.State.Running}}", name)
+    if state.returncode == 0 and state.stdout.strip() == "true":
+        return name
+    if state.returncode == 0:  # exists but stopped or broken: start clean
+        _docker_ok(docker_exe, "rm", "-f", name)
+
+    forwards = " & ".join(
+        f"socat TCP-LISTEN:{port},fork,reuseaddr TCP:host.docker.internal:{port}"
+        for port in (tunnel_port, tunnel_port + 1)
+    )
+    started = _docker_ok(
+        docker_exe, "run", "-d", "--name", name, "--restart", "unless-stopped",
+        "--label", "hermes-egress-gateway=1",
+        "--add-host", "host.docker.internal:host-gateway",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
+        "--memory", "32m", "--pids-limit", "64",
+        "--entrypoint", "sh", _EGRESS_GATEWAY_IMAGE, "-c", f"{forwards} & wait",
+        timeout=180,
+    )
+    if started.returncode != 0:
+        raise RuntimeError(f"Could not start the egress gateway: {started.stderr.strip()}")
+    joined = _docker_ok(docker_exe, "network", "connect", _EGRESS_NETWORK, name)
+    if joined.returncode != 0 and "already exists" not in joined.stderr:
+        _docker_ok(docker_exe, "rm", "-f", name)
+        raise RuntimeError(f"Could not attach the egress gateway: {joined.stderr.strip()}")
+    return name
+
+
+def _apply_egress_network_lock(
+    docker_exe: str,
+    env_overrides: dict[str, str],
+    host_args: list[str],
+) -> tuple[dict[str, str], list[str], list[str]]:
+    """Point the proxy env at the gateway and put the sandbox on the internal network.
+
+    Returns ``(env_overrides, host_args, network_args)``; unchanged (and no
+    network args) when the lock is off or the proxy is not in use.
+    """
+    proxy_url = env_overrides.get("HTTPS_PROXY", "")
+    if not proxy_url or not _egress_network_lock_enabled():
+        return env_overrides, host_args, []
+    tunnel_port = int(proxy_url.rsplit(":", 1)[1])
+    gateway = _ensure_egress_gateway(docker_exe, tunnel_port)
+    locked = {
+        key: value.replace("host.docker.internal", gateway) if key.lower().endswith("_proxy") else value
+        for key, value in env_overrides.items()
+    }
+    # host.docker.internal is unreachable from the internal network anyway;
+    # dropping the mapping keeps the sandbox from even resolving the host.
+    return locked, [], ["--network", _EGRESS_NETWORK]
+
+
 def _egress_reuse_fingerprint(
     volume_args: list[str],
     env_overrides: dict[str, str],
@@ -1091,8 +1190,15 @@ class DockerEnvironment(BaseEnvironment):
         egress_volume_args, egress_env_overrides, egress_host_args = (
             _egress_proxy_args_for_docker()
         )
+        egress_network_args: list[str] = []
+        if network:
+            egress_env_overrides, egress_host_args, egress_network_args = (
+                _apply_egress_network_lock(
+                    find_docker() or "docker", egress_env_overrides, egress_host_args,
+                )
+            )
         egress_label = _egress_reuse_fingerprint(
-            egress_volume_args, egress_env_overrides, egress_host_args,
+            egress_volume_args, egress_env_overrides, egress_host_args + egress_network_args,
         )
         _enforce_egress = _egress_enforce_on_docker()
         _critical_egress_names = _critical_egress_env_names(egress_env_overrides)
@@ -1349,6 +1455,7 @@ class DockerEnvironment(BaseEnvironment):
             + writable_args
             + resource_args
             + egress_host_args
+            + egress_network_args
             + volume_args
             + env_args
             + validated_extra

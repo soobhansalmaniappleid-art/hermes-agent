@@ -903,6 +903,11 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "options": ["env", "bitwarden"],
         "category": "security",
     },
+    "proxy.network_lock": {
+        "type": "boolean",
+        "description": "Give Docker sandboxes no network route except the egress proxy",
+        "category": "security",
+    },
     "proxy.enforce_on_docker": {
         "type": "boolean",
         "description": "Refuse Docker sandboxes when egress is enabled but not configured/running",

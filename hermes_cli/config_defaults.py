@@ -3149,6 +3149,9 @@ DEFAULT_CONFIG = {
         # cover OpenRouter, OpenAI, Anthropic, Google, xAI, Mistral, Groq,
         # Together, DeepSeek, Nous).  Wildcards (`*.foo.com`) are supported.
         "extra_allowed_hosts": [],
+        # Put Docker sandboxes on an --internal network whose only peer is a
+        # gateway to the proxy, so raw sockets cannot bypass HTTPS_PROXY.
+        "network_lock": False,
     },
 
     # Hermes Desktop (Electron app) launch options. These only affect
