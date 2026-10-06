@@ -1633,7 +1633,19 @@ def _(rid, params: dict) -> dict:
         from tools.cronjob_tools import cronjob
 
         if action == "list":
-            return _ok(rid, json.loads(cronjob(action="list")))
+            listed = json.loads(cronjob(action="list"))
+            # Golgi fork: the full prompt too, so a GUI can edit it (the tool
+            # only previews 100 characters).
+            try:
+                from cron.jobs import get_job
+
+                for job in listed.get("jobs") or []:
+                    full = get_job(job.get("job_id", ""))
+                    if full and isinstance(full.get("prompt"), str):
+                        job["prompt"] = full["prompt"]
+            except Exception:
+                pass
+            return _ok(rid, listed)
         # Golgi fork: pass the job options the cronjob tool already supports
         # (workdir, skills, model routing, toolsets, delivery) and expose
         # run-now / update, so GUIs can manage real automations.
