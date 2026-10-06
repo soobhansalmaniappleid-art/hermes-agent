@@ -13880,6 +13880,47 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5025, str(e))
 
 
+@method("voice.synthesize")
+def _(rid, params: dict) -> dict:
+    """Golgi fork: the spoken reply as audio, for a device that is not this computer.
+
+    ``voice.tts`` plays on this machine's speakers; a phone (Golgi's installed
+    web app) needs the sound itself. Same provider and voice as voice.tts
+    (the owner's cloned voice when configured), returned as base64.
+    """
+    import base64
+    import mimetypes
+    import tempfile
+
+    text = str(params.get("text", "") or "").strip()
+    if not text:
+        return _err(rid, 4020, "text required")
+    if len(text) > 4000:
+        text = text[:4000]
+    try:
+        from tools.tts_tool import text_to_speech_tool
+
+        folder = tempfile.mkdtemp(prefix="golgi-speak-")
+        result = json.loads(text_to_speech_tool(text, output_path=os.path.join(folder, "reply.mp3")))
+        path = result.get("file_path") if isinstance(result, dict) else None
+        if not result.get("success") or not path or not os.path.isfile(path):
+            return _err(rid, 5026, str(result.get("error") or "speech failed"))
+        data = open(path, "rb").read()
+        if len(data) > 8 * 1024 * 1024:
+            return _err(rid, 5026, "speech too long")
+        mime = mimetypes.guess_type(path)[0] or "audio/mpeg"
+        return _ok(rid, {"audio": base64.b64encode(data).decode(), "mime": mime})
+    except Exception as e:
+        return _err(rid, 5026, str(e))
+    finally:
+        try:
+            import shutil
+
+            shutil.rmtree(folder, ignore_errors=True)
+        except Exception:
+            pass
+
+
 @method("voice.tts")
 def _(rid, params: dict) -> dict:
     text = params.get("text", "")
