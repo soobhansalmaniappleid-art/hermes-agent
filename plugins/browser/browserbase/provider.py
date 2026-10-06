@@ -131,8 +131,17 @@ class BrowserbaseBrowserProvider(BrowserProvider):
         if enable_proxies:
             session_config["proxies"] = True
 
+        browser_settings: Dict[str, object] = {}
         if enable_advanced_stealth:
-            session_config["browserSettings"] = {"advancedStealth": True}
+            browser_settings["advancedStealth"] = True
+        # Golgi fork: a persistent context keeps the owner's sign-ins (cookies,
+        # local storage) from one cloud session to the next, so the agent logs
+        # in once — like a computer of its own.
+        context_id = (get_secret("BROWSERBASE_CONTEXT_ID") or "").strip()
+        if context_id:
+            browser_settings["context"] = {"id": context_id, "persist": True}
+        if browser_settings:
+            session_config["browserSettings"] = browser_settings
 
         # --- Create session via API ---
         headers = {
