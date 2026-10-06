@@ -1784,6 +1784,11 @@ def _(rid, params: dict) -> dict:
             env = params.get("env")
             if isinstance(env, dict) and env:
                 config["env"] = {str(k): str(v) for k, v in env.items()}
+            # Remote servers that authenticate with a header (Composio Connect:
+            # x-consumer-api-key). Values may be ${VAR} references to .env.
+            headers = params.get("headers")
+            if config.get("url") and isinstance(headers, dict) and headers:
+                config["headers"] = {str(k): str(v) for k, v in headers.items()}
             if not mcp_config._save_mcp_server(name, config):
                 return _err(rid, 4042, "Hermes refused this server configuration as unsafe")
             return _ok(rid, {"saved": True, "name": name})
