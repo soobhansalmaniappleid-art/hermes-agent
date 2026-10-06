@@ -1642,6 +1642,9 @@ def _(rid, params: dict) -> dict:
             for key in (
                 "workdir", "skills", "model", "provider", "deliver", "repeat",
                 "enabled_toolsets", "context_from",
+                # Triggers: a cheap source checked each tick; the agent runs
+                # only when it changed (cron/monitor.py).
+                "monitor_url", "monitor_script",
             )
             if params.get(key) not in (None, "", [])
         }
