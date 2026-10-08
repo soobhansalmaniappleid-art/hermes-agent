@@ -31,6 +31,7 @@ Optional feature knobs::
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -42,6 +43,30 @@ from agent.browser_provider import BrowserProvider
 from agent.secret_scope import get_secret
 
 logger = logging.getLogger(__name__)
+
+
+def _own_context(task_id: str) -> str:
+    """Golgi fork: the browser profile of the agent this session belongs to.
+
+    Golgi gives each of the owner's agents ("Dots") a persistent Browserbase
+    context of its own, so each stays signed in to its own accounts, and maps
+    the agent's Hermes sessions to it in $HERMES_HOME/golgi/browser_contexts.json
+    ({session key: context id}). Sessions not listed there use the shared
+    BROWSERBASE_CONTEXT_ID.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+
+        mapping = json.loads((get_hermes_home() / "golgi" / "browser_contexts.json").read_text())
+    except (OSError, ValueError, ImportError):
+        return ""
+    if not isinstance(mapping, dict):
+        return ""
+    for key in (str(task_id or ""), str(task_id or "").split(":", 1)[0]):
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 class BrowserbaseBrowserProvider(BrowserProvider):
@@ -137,7 +162,7 @@ class BrowserbaseBrowserProvider(BrowserProvider):
         # Golgi fork: a persistent context keeps the owner's sign-ins (cookies,
         # local storage) from one cloud session to the next, so the agent logs
         # in once — like a computer of its own.
-        context_id = (get_secret("BROWSERBASE_CONTEXT_ID") or "").strip()
+        context_id = _own_context(task_id) or (get_secret("BROWSERBASE_CONTEXT_ID") or "").strip()
         if context_id:
             browser_settings["context"] = {"id": context_id, "persist": True}
         if browser_settings:
