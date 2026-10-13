@@ -10017,6 +10017,36 @@ def _build_oauth_catalog() -> list[Dict[str, Any]]:
     return rows
 
 
+@app.get("/api/providers/usage")
+async def get_provider_usage(provider: str = Query(..., min_length=1, max_length=64)):
+    """Golgi fork: an account's plan limits (ChatGPT/Codex 5-hour and weekly
+    windows, Claude, OpenRouter credit) for the app's usage page, from the same
+    snapshot the CLI's /usage prints."""
+    from agent.account_usage import fetch_account_usage
+
+    snapshot = await asyncio.to_thread(fetch_account_usage, provider)
+    if snapshot is None:
+        return {"provider": provider, "available": False, "windows": [], "details": []}
+    return {
+        "provider": snapshot.provider,
+        "available": snapshot.available,
+        "title": snapshot.title,
+        "plan": snapshot.plan,
+        "windows": [
+            {
+                "label": w.label,
+                "used_percent": w.used_percent,
+                "reset_at": w.reset_at.isoformat() if w.reset_at else None,
+                "detail": w.detail,
+            }
+            for w in snapshot.windows
+        ],
+        "details": list(snapshot.details),
+        "unavailable_reason": snapshot.unavailable_reason,
+        "fetched_at": snapshot.fetched_at.isoformat(),
+    }
+
+
 @app.get("/api/providers/oauth")
 async def list_oauth_providers(profile: Optional[str] = None):
     """Enumerate every OAuth-capable LLM provider with current status.

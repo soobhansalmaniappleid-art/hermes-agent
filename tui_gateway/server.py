@@ -4972,6 +4972,14 @@ def _get_usage(agent) -> dict:
         "total": g("session_total_tokens"),
         "calls": g("session_api_calls"),
     }
+    # Golgi fork: the session's estimated spend, so the app can show what each
+    # reply cost (usage_pricing's estimate; 0 when the model's price is unknown).
+    try:
+        cost = float(getattr(agent, "session_estimated_cost_usd", 0) or 0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    if cost > 0:
+        usage["cost_usd"] = round(cost, 6)
     comp = getattr(agent, "context_compressor", None)
     if comp:
         # context_used is the *current-window* occupancy. Do NOT fall back to
