@@ -1708,6 +1708,7 @@ def _(rid, params: dict) -> dict:
                     "url": cfg.get("url"),
                     "command": cfg.get("command"),
                     "args": cfg.get("args") or [],
+                    "cwd": cfg.get("cwd"),
                     "enabled": bool(cfg.get("enabled", True)),
                 }
                 for key, cfg in sorted(servers.items())
@@ -1784,6 +1785,9 @@ def _(rid, params: dict) -> dict:
             env = params.get("env")
             if isinstance(env, dict) and env:
                 config["env"] = {str(k): str(v) for k, v in env.items()}
+            cwd = str(params.get("cwd") or "").strip()
+            if config.get("command") and cwd:
+                config["cwd"] = cwd
             # Remote servers that authenticate with a header (Composio Connect:
             # x-consumer-api-key). Values may be ${VAR} references to .env.
             headers = params.get("headers")

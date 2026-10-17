@@ -12253,6 +12253,9 @@ def _normalize_mcp_server_create(
             server_config["args"] = list(body.args)
         if body.env:
             server_config["env"] = dict(body.env)
+        cwd = (body.cwd or "").strip()
+        if cwd:
+            server_config["cwd"] = cwd
 
     issues = validate_mcp_server_entry(name, server_config)
     if issues:
@@ -12286,6 +12289,7 @@ def _mcp_server_summary(name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "command": cfg.get("command"),
         "args": list(cfg.get("args") or []),
         "env": _redact_mcp_env(cfg.get("env") or {}),
+        "cwd": cfg.get("cwd"),
         "auth": auth,
         "enabled": cfg.get("enabled", True) is not False,
         # Tool selection: list of enabled tool names, or None = all.

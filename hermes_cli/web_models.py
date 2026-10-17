@@ -394,6 +394,7 @@ class MCPServerCreate(BaseModel):
     args: List[str] = []
     # env: KEY=VALUE map for stdio servers (API keys, etc.)
     env: Dict[str, str] = {}
+    cwd: Optional[str] = None
     # auth: "none" | "oauth" | "header" | None
     auth: Optional[str] = None
     # One-time provisioning input; persisted only to the profile's .env.
