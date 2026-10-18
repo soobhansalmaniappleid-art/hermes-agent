@@ -1708,6 +1708,7 @@ def _(rid, params: dict) -> dict:
                     "url": cfg.get("url"),
                     "command": cfg.get("command"),
                     "args": cfg.get("args") or [],
+                    "env_passthrough": cfg.get("env_passthrough") or [],
                     "cwd": cfg.get("cwd"),
                     "enabled": bool(cfg.get("enabled", True)),
                 }
@@ -1785,6 +1786,21 @@ def _(rid, params: dict) -> dict:
             env = params.get("env")
             if isinstance(env, dict) and env:
                 config["env"] = {str(k): str(v) for k, v in env.items()}
+            passthrough = params.get("env_passthrough")
+            if config.get("command") and isinstance(passthrough, list):
+                names = [str(value).strip() for value in passthrough]
+                names = [value for value in names if value]
+                if any(
+                    not value.replace("_", "a").isalnum() or value[0].isdigit()
+                    for value in names
+                ):
+                    return _err(
+                        rid,
+                        4047,
+                        "environment variable names must contain only letters, numbers, and underscores",
+                    )
+                if names:
+                    config["env_passthrough"] = list(dict.fromkeys(names))
             cwd = str(params.get("cwd") or "").strip()
             if config.get("command") and cwd:
                 config["cwd"] = cwd

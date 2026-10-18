@@ -121,6 +121,8 @@ _KNOWN_HERMES_KEYS = {
 _KEYS_DROPPED_WITH_WARNING = {
     # Hermes' sampling subsection — codex MCP has no equivalent
     "sampling",
+    # Hermes resolves these names from its own process environment at spawn.
+    "env_passthrough",
 }
 
 

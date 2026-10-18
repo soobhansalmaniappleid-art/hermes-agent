@@ -490,7 +490,7 @@ def _context_var_value(ref: str) -> Optional[str]:
 # Security helpers
 # ---------------------------------------------------------------------------
 
-def _build_safe_env(user_env: Optional[dict]) -> dict:
+def _build_safe_env(user_env: Optional[dict], passthrough: Optional[list] = None) -> dict:
     """Build a filtered environment dict for stdio subprocesses.
 
     Only passes through safe baseline variables (PATH, HOME, etc.) and XDG_*
@@ -520,6 +520,12 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
             env[key] = value
     if user_env:
         env.update(user_env)
+    # Names in this list were explicitly approved by the owner.  Read only
+    # those variables; never copy the whole parent environment into an MCP.
+    for raw_name in passthrough or []:
+        name = str(raw_name).strip()
+        if name and name in os.environ:
+            env[name] = os.environ[name]
     return env
 
 
@@ -2521,7 +2527,7 @@ class MCPServerTask:
                 f"MCP server '{self.name}' has no 'command' in config"
             )
 
-        safe_env = _build_safe_env(user_env)
+        safe_env = _build_safe_env(user_env, config.get("env_passthrough"))
         command, safe_env = _resolve_stdio_command(command, safe_env)
 
         # Check package against OSV malware database before spawning.
