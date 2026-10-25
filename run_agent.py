@@ -1613,6 +1613,13 @@ class AIAgent:
         return AIAgent._model_requires_responses_api(model)
 
     def _max_tokens_param(self, value: int) -> dict:
+        if (
+            isinstance(value, int)
+            and value > 8192
+            and getattr(self, "_ephemeral_max_output_tokens", None) is None
+            and getattr(self, "max_tokens", None) is None
+        ):
+            value = 8192
         """Return the correct max tokens kwarg for the current provider.
 
         OpenAI's newer models (gpt-4o, gpt-4.1, gpt-5+, o-series) require

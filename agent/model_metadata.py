@@ -1590,6 +1590,16 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
     """
     error_lower = error_msg.lower()
 
+    # OpenRouter HTTP 402 affordable max_tokens cap:
+    # "This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 3967."
+    if "fewer max_tokens" in error_lower or "can only afford" in error_lower:
+        _m_afford = re.search(r"can only afford\s+(\d+)", error_lower)
+        if _m_afford:
+            _afford = int(_m_afford.group(1))
+            if _afford >= 64:
+                return max(64, _afford - 64)
+        return 2048
+
     # Must look like an output-cap error, not a prompt-length error.
     is_output_cap_error = (
         "max_tokens" in error_lower
@@ -1739,6 +1749,8 @@ def is_output_cap_error(error_msg: str) -> bool:
         or "should be" in error_lower                       # generic "max_tokens should be <= N"
         or "less than or equal" in error_lower
         or "must be" in error_lower
+        or "fewer max_tokens" in error_lower
+        or "can only afford" in error_lower
     )
     if not output_cap_signal:
         return False

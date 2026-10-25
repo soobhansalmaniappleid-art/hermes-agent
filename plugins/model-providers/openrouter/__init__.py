@@ -196,6 +196,7 @@ openrouter = OpenRouterProfile(
     name="openrouter",
     aliases=("or",),
     env_vars=("OPENROUTER_API_KEY",),
+    default_max_tokens=8192,
     display_name="OpenRouter",
     description="OpenRouter — unified API for 200+ models",
     signup_url="https://openrouter.ai/keys",

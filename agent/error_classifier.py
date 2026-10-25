@@ -1252,12 +1252,27 @@ def _classify_by_status(
 
 
 def _classify_402(error_msg: str, result_fn) -> ClassifiedError:
-    """Disambiguate 402: billing exhaustion vs transient usage limit.
+    """Disambiguate 402: billing exhaustion vs transient usage limit or oversized max_tokens.
 
     The key insight from OpenClaw: some 402s are transient rate limits
     disguised as payment errors.  "Usage limit, try again in 5 minutes"
     is NOT a billing problem — it's a periodic quota that resets.
+    OpenRouter also returns HTTP 402 when a request asks for an oversized
+    max_tokens (e.g. 65536) that exceeds remaining credits ("fewer max_tokens",
+    "can only afford 3967") even though a normal 2048-4096 token response fits.
     """
+    error_lower = (error_msg or "").lower()
+    if "fewer max_tokens" in error_lower or "can only afford" in error_lower:
+        m = re.search(r"can only afford\s+(\d+)", error_lower)
+        affordable = int(m.group(1)) if m else 4096
+        if affordable >= 128:
+            return result_fn(
+                FailoverReason.context_overflow,
+                retryable=True,
+                should_rotate_credential=False,
+                should_fallback=False,
+            )
+
     # Check for transient usage-limit signals first
     has_usage_limit = any(p in error_msg for p in _USAGE_LIMIT_PATTERNS)
     has_transient_signal = any(p in error_msg for p in _USAGE_LIMIT_TRANSIENT_SIGNALS)
